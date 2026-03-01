@@ -1,7 +1,7 @@
 name: Security Scanner Test
 
 on:
-  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
   scan-and-report:
@@ -10,29 +10,29 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1. Generate SBOM
+      # 1. Generate SBOM (Fixed input: path)
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
           format: spdx-json
           output-file: sbom.spdx.json
-          artifact: .
+          path: . 
 
-      # 2. Scan SBOM for Vulnerabilities
+      # 2. Scan SBOM (Fixed input: sbom)
       - name: Scan for Vulnerabilities
         id: scan
         uses: anchore/scan-action@v3
         with:
-          file: sbom.spdx.json
+          sbom: sbom.spdx.json
           severity-cutoff: high
-          fail-build: false # We handle the logic
+          fail-build: false
           output-format: json
 
-      # 3. Process and Filter Results (ENHANCED)
+      # 3. Process Results (Repo Link, CVE Link, CVSS, Fix Version)
       - name: Process Results
         id: process
         run: |
-          # Define Repo Link
+          # Setup Vars
           REPO_NAME="${{ github.repository }}"
           REPO_LINK="${{ github.server_url }}/${{ github.repository }}"
           
@@ -52,13 +52,13 @@ jobs:
             echo "has_issues=true" >> $GITHUB_OUTPUT
             echo "count=$COUNT" >> $GITHUB_OUTPUT
             
-            # --- Create Detailed Text Report ---
+            # --- Create Human Readable Text Report for Logs/Email ---
             echo "🚨 **Security Vulnerability Report** 🚨" > report.txt
             echo "Repository: [$REPO_NAME]($REPO_LINK)" >> report.txt
             echo "Total High/Critical Issues: $COUNT" >> report.txt
             echo "----------------------------------------" >> report.txt
             
-            # Parse each vulnerability and append details
+            # Append detailed vulnerability info
             jq -r '.[] | 
               "Package: \(.artifact.name) (\(.artifact.version))\n
               Vulnerability: \(.vulnerability.id)\n
@@ -68,15 +68,28 @@ jobs:
               Action: \(if .vulnerability.fix.versions then "Upgrade to " + (.vulnerability.fix.versions | join(", ")) else "No fix available" end)\n
               ---"' filtered_results.json >> report.txt
 
-            # --- Prepare content for Slack ---
-            # We create a clean environment variable for Slack
-            REPORT_CONTENT=$(cat report.txt)
-            
-            echo "REPORT_CONTENT<<EOF" >> $GITHUB_ENV
-            echo "$REPORT_CONTENT" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-            
-            # Print to logs for debugging
+            # --- Create JSON Payload for Slack (Safe Method) ---
+            # We construct the block kit JSON structure using jq to handle escaping automatically
+            jq -n \
+              --arg text "Security Alert: $COUNT High/Critical vulnerabilities in $REPO_NAME" \
+              --arg repo_link "$REPO_LINK" \
+              --arg repo_name "$REPO_NAME" \
+              --arg count "$COUNT" \
+              --arg report "$(cat report.txt)" \
+              '{
+                "text": $text,
+                "blocks": [
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": $report
+                    }
+                  }
+                ]
+              }' > slack-payload.json
+
+            # Print to logs
             echo "--- REPORT PREVIEW ---"
             cat report.txt
             echo "--- END PREVIEW ---"
@@ -85,24 +98,12 @@ jobs:
             echo "No High or Critical vulnerabilities found."
           fi
 
-      # 4. Send to Slack
+      # 4. Send to Slack (Using file payload to avoid escaping issues)
       - name: Notify Slack
         if: steps.process.outputs.has_issues == 'true'
         uses: slackapi/slack-github-action@v1
         with:
-          payload: |
-            {
-              "text": "Security Alert: ${{ steps.process.outputs.count }} High/Critical vulnerabilities found in ${{ github.repository }}",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": ${{ toJson(env.REPORT_CONTENT) }}
-                  }
-                }
-              ]
-            }
+          payload-file-path: slack-payload.json
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
