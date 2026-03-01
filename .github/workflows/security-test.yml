@@ -10,7 +10,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1. Generate SBOM (Fixed input: path)
+      # 1. Generate SBOM
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
@@ -18,7 +18,7 @@ jobs:
           output-file: sbom.spdx.json
           path: . 
 
-      # 2. Scan SBOM (Fixed input: sbom)
+      # 2. Scan SBOM
       - name: Scan for Vulnerabilities
         id: scan
         uses: anchore/scan-action@v3
@@ -28,37 +28,77 @@ jobs:
           fail-build: false
           output-format: json
 
-      # 3. Process Results (Repo Link, CVE Link, CVSS, Fix Version)
+      # 3. Process Results (With Executive Summary)
       - name: Process Results
         id: process
         run: |
-          # Setup Vars
           REPO_NAME="${{ github.repository }}"
           REPO_LINK="${{ github.server_url }}/${{ github.repository }}"
           
-          # Check if results exist
           if [ ! -f results.json ]; then
             echo "No vulnerabilities found."
             echo "has_issues=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # Filter for High and Critical ONLY
-          jq '[.matches[] | select(.vulnerability.severity == "Critical" or .vulnerability.severity == "High")]' results.json > filtered_results.json
+          # --- Calculate Statistics ---
           
+          # 1. Count total packages from SBOM
+          TOTAL_PACKAGES=$(jq '.packages | length' sbom.spdx.json)
+          
+          # 2. Count vulnerabilities by severity
+          TOTAL_CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' results.json)
+          TOTAL_HIGH=$(jq '[.matches[] | select(.vulnerability.severity == "High")] | length' results.json)
+          TOTAL_MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity == "Medium")] | length' results.json)
+          
+          # 3. Determine Risk Level
+          if [ "$TOTAL_CRITICAL" -gt 0 ]; then
+            RISK_LEVEL="🔴 CRITICAL"
+            RISK_ADVICE="Immediate action required. Critical vulnerabilities found."
+          elif [ "$TOTAL_HIGH" -gt 0 ]; then
+            RISK_LEVEL="🟠 HIGH"
+            RISK_ADVICE="Action required. High severity vulnerabilities found."
+          elif [ "$TOTAL_MEDIUM" -gt 0 ]; then
+            RISK_LEVEL="🟡 MEDIUM"
+            RISK_ADVICE="Review recommended. Medium severity vulnerabilities found."
+          else
+            RISK_LEVEL="🟢 LOW"
+            RISK_ADVICE="No high or critical vulnerabilities found."
+          fi
+
+          # 4. Filter for the detailed report (Only High/Critical)
+          jq '[.matches[] | select(.vulnerability.severity == "Critical" or .vulnerability.severity == "High")]' results.json > filtered_results.json
           COUNT=$(jq 'length' filtered_results.json)
           
           if [ "$COUNT" -gt 0 ]; then
             echo "has_issues=true" >> $GITHUB_OUTPUT
             echo "count=$COUNT" >> $GITHUB_OUTPUT
             
-            # --- Create Human Readable Text Report for Logs/Email ---
-            echo "🚨 **Security Vulnerability Report** 🚨" > report.txt
-            echo "Repository: [$REPO_NAME]($REPO_LINK)" >> report.txt
-            echo "Total High/Critical Issues: $COUNT" >> report.txt
-            echo "----------------------------------------" >> report.txt
+            # --- Build The Report ---
             
-            # Append detailed vulnerability info
+            # A. Executive Summary Section
+            {
+              echo "📊 **Executive Security Summary**";
+              echo "================================";
+              echo "**Repository**: [$REPO_NAME]($REPO_LINK)";
+              echo "**Packages Scanned**: $TOTAL_PACKAGES";
+              echo "**Overall Risk**: $RISK_LEVEL";
+              echo "";
+              echo "**Vulnerability Breakdown**:";
+              echo "• Critical: $TOTAL_CRITICAL";
+              echo "• High: $TOTAL_HIGH";
+              echo "• Medium: $TOTAL_MEDIUM";
+              echo "";
+              echo "**Recommendation**: $RISK_ADVICE";
+              echo "";
+              echo "================================";
+              echo "";
+            } > report.txt
+
+            # B. Detailed Findings Section
+            echo "🔍 **Detailed High/Critical Findings**" >> report.txt
+            echo "" >> report.txt
+            
             jq -r '.[] | 
               "Package: \(.artifact.name) (\(.artifact.version))\n
               Vulnerability: \(.vulnerability.id)\n
@@ -68,13 +108,9 @@ jobs:
               Action: \(if .vulnerability.fix.versions then "Upgrade to " + (.vulnerability.fix.versions | join(", ")) else "No fix available" end)\n
               ---"' filtered_results.json >> report.txt
 
-            # --- Create JSON Payload for Slack (Safe Method) ---
-            # We construct the block kit JSON structure using jq to handle escaping automatically
+            # --- Prepare Slack Payload ---
             jq -n \
               --arg text "Security Alert: $COUNT High/Critical vulnerabilities in $REPO_NAME" \
-              --arg repo_link "$REPO_LINK" \
-              --arg repo_name "$REPO_NAME" \
-              --arg count "$COUNT" \
               --arg report "$(cat report.txt)" \
               '{
                 "text": $text,
@@ -98,7 +134,7 @@ jobs:
             echo "No High or Critical vulnerabilities found."
           fi
 
-      # 4. Send to Slack (Using file payload to avoid escaping issues)
+      # 4. Send to Slack
       - name: Notify Slack
         if: steps.process.outputs.has_issues == 'true'
         uses: slackapi/slack-github-action@v1
