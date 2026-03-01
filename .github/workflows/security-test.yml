@@ -25,13 +25,17 @@ jobs:
         with:
           file: sbom.spdx.json
           severity-cutoff: high
-          fail-build: false # We handle the logic, so we don't want the job to fail immediately
+          fail-build: false # We handle the logic
           output-format: json
 
-      # 3. Process and Filter Results
+      # 3. Process and Filter Results (ENHANCED)
       - name: Process Results
         id: process
         run: |
+          # Define Repo Link
+          REPO_NAME="${{ github.repository }}"
+          REPO_LINK="${{ github.server_url }}/${{ github.repository }}"
+          
           # Check if results exist
           if [ ! -f results.json ]; then
             echo "No vulnerabilities found."
@@ -39,7 +43,7 @@ jobs:
             exit 0
           fi
 
-          # Filter for High and Critical ONLY (CVSS >= 7)
+          # Filter for High and Critical ONLY
           jq '[.matches[] | select(.vulnerability.severity == "Critical" or .vulnerability.severity == "High")]' results.json > filtered_results.json
           
           COUNT=$(jq 'length' filtered_results.json)
@@ -48,25 +52,34 @@ jobs:
             echo "has_issues=true" >> $GITHUB_OUTPUT
             echo "count=$COUNT" >> $GITHUB_OUTPUT
             
-            # Create Text Report
+            # --- Create Detailed Text Report ---
             echo "🚨 **Security Vulnerability Report** 🚨" > report.txt
-            echo "Repository: $GITHUB_REPOSITORY" >> report.txt
+            echo "Repository: [$REPO_NAME]($REPO_LINK)" >> report.txt
             echo "Total High/Critical Issues: $COUNT" >> report.txt
             echo "----------------------------------------" >> report.txt
             
-            # Append details to report
-            jq -r '.[] | "Package: \(.artifact.name)\nVulnerability: \(.vulnerability.id)\nSeverity: \(.vulnerability.severity)\n---"' filtered_results.json >> report.txt
-            
-            # Prepare content for Slack (Handling newlines)
+            # Parse each vulnerability and append details
+            jq -r '.[] | 
+              "Package: \(.artifact.name) (\(.artifact.version))\n
+              Vulnerability: \(.vulnerability.id)\n
+              Severity: \(.vulnerability.severity)\n
+              CVSS Score: \((.vulnerability.cvss // []) | map(.baseScore) | max // "N/A")\n
+              Link (OSV): https://osv.dev/vulnerability/\(.vulnerability.id)\n
+              Action: \(if .vulnerability.fix.versions then "Upgrade to " + (.vulnerability.fix.versions | join(", ")) else "No fix available" end)\n
+              ---"' filtered_results.json >> report.txt
+
+            # --- Prepare content for Slack ---
+            # We create a clean environment variable for Slack
             REPORT_CONTENT=$(cat report.txt)
+            
             echo "REPORT_CONTENT<<EOF" >> $GITHUB_ENV
             echo "$REPORT_CONTENT" >> $GITHUB_ENV
             echo "EOF" >> $GITHUB_ENV
             
             # Print to logs for debugging
-            echo "--- REPORT START ---"
+            echo "--- REPORT PREVIEW ---"
             cat report.txt
-            echo "--- REPORT END ---"
+            echo "--- END PREVIEW ---"
           else
             echo "has_issues=false" >> $GITHUB_OUTPUT
             echo "No High or Critical vulnerabilities found."
