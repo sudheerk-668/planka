@@ -2,10 +2,7 @@ name: Security Scanner Test
 
 on:
   workflow_dispatch:
-  schedule:
-    # Runs every 4 days at 6:00 AM UTC
-    - cron: '0 6 */4 * *'
-    
+
 jobs:
   scan-and-report:
     runs-on: ubuntu-latest
@@ -21,19 +18,16 @@ jobs:
           output-file: sbom.spdx.json
           path: . 
 
-      # 2. NEW: Convert SBOM to CSV for easy viewing
+      # 2. Convert SBOM to CSV for easy viewing
       - name: Generate CSV Package List
         run: |
           echo "Converting SBOM to CSV..."
-          # Extract Name, Version, and License from SPDX JSON
           jq -r '["Package Name", "Version", "License"], (.packages[] | select(.name != null) | [.name, .versionInfo // "N/A", .licenseDeclared // .licenseConcluded // "NOASSERTION"]) | @csv' sbom.spdx.json > packages.csv
-          
-          # Print preview to logs
           echo "--- CSV Preview (First 10 lines) ---"
           head -n 10 packages.csv
           echo "------------------------------------"
 
-      # 3. NEW: Upload SBOMs as downloadable artifacts
+      # 3. Upload SBOMs as downloadable artifacts
       - name: Upload SBOM Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -52,7 +46,7 @@ jobs:
           fail-build: false
           output-format: json
 
-      # 5. Process Results (Repo Link, CVE Link, CVSS, Fix Version)
+      # 5. Process Results (With BOLD Formatting)
       - name: Process Results
         id: process
         run: |
@@ -77,27 +71,25 @@ jobs:
             echo "count=$COUNT" >> $GITHUB_OUTPUT
             
             # --- Create Human Readable Text Report for Logs/Email ---
-            echo "🚨 **Security Vulnerability Report** 🚨" > report.txt
-            echo "Repository: [$REPO_NAME]($REPO_LINK)" >> report.txt
-            echo "Total High/Critical Issues: $COUNT" >> report.txt
+            # Using *text* for Slack Bold
+            echo "🚨 *Security Vulnerability Report* 🚨" > report.txt
+            echo "*Repository*: <$REPO_LINK|$REPO_NAME>" >> report.txt
+            echo "*Total High/Critical Issues*: $COUNT" >> report.txt
             echo "----------------------------------------" >> report.txt
             
-            # Append detailed vulnerability info
+            # Append detailed vulnerability info with BOLD labels
             jq -r '.[] | 
-              "Package: \(.artifact.name) (\(.artifact.version))\n
-              Vulnerability: \(.vulnerability.id)\n
-              Severity: \(.vulnerability.severity)\n
-              CVSS Score: \((.vulnerability.cvss // []) | map(.baseScore) | max // "N/A")\n
-              Link (OSV): https://osv.dev/vulnerability/\(.vulnerability.id)\n
-              Action: \(if .vulnerability.fix.versions then "Upgrade to " + (.vulnerability.fix.versions | join(", ")) else "No fix available" end)\n
+              "*Package*: \(.artifact.name) (\(.artifact.version))\n
+              *Vulnerability*: \(.vulnerability.id)\n
+              *Severity*: \(.vulnerability.severity)\n
+              *CVSS Score*: \((.vulnerability.cvss // []) | map(.baseScore) | max // "N/A")\n
+              *Link (OSV)*: https://osv.dev/vulnerability/\(.vulnerability.id)\n
+              *Action*: \(if .vulnerability.fix.versions then "Upgrade to " + (.vulnerability.fix.versions | join(", ")) else "No fix available" end)\n
               ---"' filtered_results.json >> report.txt
 
-            # --- Create JSON Payload for Slack (Safe Method) ---
+            # --- Create JSON Payload for Slack ---
             jq -n \
               --arg text "Security Alert: $COUNT High/Critical vulnerabilities in $REPO_NAME" \
-              --arg repo_link "$REPO_LINK" \
-              --arg repo_name "$REPO_NAME" \
-              --arg count "$COUNT" \
               --arg report "$(cat report.txt)" \
               '{
                 "text": $text,
